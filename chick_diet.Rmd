@@ -1,0 +1,293 @@
+---
+author: "Ranieri Dugo"
+date: "2026-03-18"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+<style>
+body {
+  font-size: 18pt;  /* increases main text */
+}
+h1, h2, h3 {
+  font-size: 2em;   /* headings */
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Diet Effects on Chicken Weights
+
+## 1 Introduction
+
+We observe weight measurements for 30 chicks over 21 days, denoted by:
+$$
+y_{i,t},
+$$
+where $i=1,\dots,30$ indexes the chicks, and $t\in\{0,2,4,\dots,20,21\}$ indexes the day of observation.
+
+```{r, include = TRUE}
+library(ggplot2)
+library(dplyr)
+
+df <- 
+  datasets::ChickWeight |>
+  filter(Diet %in% c(1, 2)) |>
+  mutate(Diet = recode(Diet, `1` = "Diet 1", `2` = "Diet 2")) |>
+  rename(Weight = weight)
+
+df |>
+  select(Chick, Diet) |>
+  unique() |>
+  count(Diet)
+```
+
+The chicks were assigned to one of two diets, with 20 chicks following Diet 1 and 10 chicks following Diet 2. 
+
+```{r, include = TRUE}
+library(tidyr)
+df |>
+  select(Chick, Diet, Time) |>
+  count(Diet, Time) |>
+  pivot_wider(names_from = Diet, values_from = n)
+```
+
+Measurements for the chicks following Diet 2 are recorded consistently over the 21 days. Four chicks in Diet 1 have incomplete weight records by day 21. 
+
+We want to determine whether different diets determine different growth in the chicks.
+
+## 2 Exploratory data analysis
+
+### Growth curves
+
+If different diets lead to different growth, we would expect different slopes in the growth curves of chicks.
+
+```{r, include = TRUE}
+df |>
+  ggplot(aes(x = Time, y = Weight, group = Chick, color = Diet)) +
+  geom_line(alpha = 0.5) +
+  theme_minimal() +
+  scale_color_manual(
+    values = c("Diet 1" = "steelblue", "Diet 2" = "#C44E52"))
+```
+
+### Boxplot
+
+Equivalently, one group of chicks would exhibit higher overall weights at the terminal day, $t=21$. 
+
+
+```{r, include = TRUE}
+df |>
+  group_by(Chick) |>
+  filter(Time == 21) |>
+  ggplot(aes(x = Diet, y = Weight, fill = Diet)) +
+  geom_boxplot() + 
+  theme_minimal() +
+  scale_fill_manual(
+    values = c("Diet 1" = "steelblue", "Diet 2" = "#C44E52"))
+```
+
+While Diet 2 appears to deliver a higher median weight than Diet 1, the difference can be small relative to the variability.
+
+## 3 Simple comparison
+
+### QQ plots
+
+Visually, the final weight distributions under both diets appear close to Gaussian.
+
+```{r, include = TRUE}
+df |> 
+  filter(Time == 21) |> 
+  ggplot(aes(sample = Weight)) +
+  stat_qq(color = "steelblue") +
+  stat_qq_line(color = "#C44E52") +
+  facet_wrap(~ Diet, scales="free") + 
+  theme_minimal() +
+  labs(
+    x = "Theoretical Quantile",
+    y = "Empirical Quantile",
+    title="QQ Plots of Chick Weight at Day 21")
+
+```
+
+### Test
+
+We can test equality in the means of two Gaussian populations with (possibly) unequal variances using the *Welch's t-test*. 
+
+$H_0$: chicks on different diets have the same weight on $t=21$;
+
+$H_1$: chicks on different diets have different weights on $t=21$.
+
+```{r, include = TRUE}
+df |>
+  group_by(Chick) |>
+  filter(Time == 21) %>%
+  t.test(Weight ~ Diet, data = .)
+```
+  
+We fail to reject $H_0$. 
+
+## 4 Linear regression
+
+The previous approach discards information for $t<21$. 
+
+We consider the linear model:
+
+\[
+y_{i,t} = \beta_0 + \beta_1 t + \beta_2 \, \mathbf{1}_{\{ \text{Diet}_i = 2 \}} + \varepsilon_{i,t},
+\]
+
+where
+
+\[
+\mathbf{1}_{\{ \text{Diet}_i = 2 \}} =
+\begin{cases}
+1 & \text{if chick } i \text{ is on Diet 2}, \\
+0 & \text{otherwise}.
+\end{cases}
+\]
+
+### Estimation and inference
+
+- Ordinary least squares estimation;
+
+- Inference under Gaussian assumption, $\varepsilon_{i,t}\sim\mathcal{N}(0,\Sigma)$.
+
+```{r, include = TRUE}
+naive_lm = 
+  df %>%
+  lm(Weight ~ Time + Diet, data = .)
+
+summary(naive_lm)
+```
+
+- The output considers $\Sigma = \sigma^2I$.
+
+### Diagnostics 1: residuals vs fitted values
+
+```{r, include = TRUE}
+res_diagnostics_heterosced <- function(model){
+  data.frame(
+  fitted_values = fitted(model),
+  residuals = residuals(model)) |>
+  ggplot(aes(x = fitted_values, y = residuals)) +
+  geom_point(color = "steelblue", alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "#C44E52", linetype = "dashed") +
+  labs(x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+}
+
+res_diagnostics_heterosced(naive_lm)
+```
+
+- Linearity of the conditional mean appears adequate; 
+
+- Presence of *heteroscedasticity*: covariates do not capture that variability in weight increases with the weight itself.
+
+### Diagnostics 2: autocorrelation of residuals
+
+Repeated measurements for the same chicks over time induce *autocorrelation* in the residuals.
+
+```{r, include = TRUE}
+res_diagnostics_autocorr <- function(model){
+  res = residuals(model)
+  tmp <- acf(res, plot = FALSE)
+  foo <- 1.96 / sqrt(length(res))
+  data.frame(Lag = tmp$lag[-1], ACF = tmp$acf[-1]) |>
+    ggplot(aes(x = Lag, y = ACF)) +
+    geom_col(fill = "steelblue", alpha = 0.8) +
+    geom_hline(yintercept = c(foo, - foo), linetype = "dashed", color = "#C44E52") +
+    labs(x = "Lag", y = "Autocorrelation") +
+    theme_minimal()
+}
+
+res_diagnostics_autocorr(naive_lm)
+```
+
+
+<!-- # ```{r, include = TRUE} -->
+<!-- # plot(naive_lm, 2) -->
+<!-- # ``` -->
+
+### Clustered standard errors
+
+- Autocorrelation and heteroscedasticity robust standard errors;
+
+- Block diagonal covariance matrix of residuals;
+
+- $Cov(\varepsilon_{i,t},\varepsilon_{i,s})\ne 0,\forall t,s$ and $Cov(\varepsilon_{i,t},\varepsilon_{j,s})= 0,\forall i\ne j, t,s$.
+
+```{r, include = TRUE}
+library(sandwich)
+library(lmtest)
+cluster_se <- vcovCL(naive_lm, cluster = ~ Chick)
+coeftest(naive_lm, vcov = cluster_se)
+```
+
+## 5 Mixed-effects model
+
+Explicitly model within-chick variability adding random effects, $b_{0,i}$ and $b_{1,i}$, to the linear model:
+
+\[
+y_{i,t} = \beta_0 + \beta_1 t + \beta_2 \, \mathbf{1}_{\{ \text{Diet}_i = 2 \}} 
++ b_{0,i} + b_{1,i} t + \varepsilon_{i,t},
+\]
+
+\[
+\begin{pmatrix}
+b_{0i} \\
+b_{1i}
+\end{pmatrix}
+\sim \mathcal{N}\left(
+\begin{pmatrix}
+0 \\
+0
+\end{pmatrix},
+\begin{pmatrix}
+\sigma_0^2 & \sigma_{01} \\
+\sigma_{01} & \sigma_1^2
+\end{pmatrix}
+\right), \quad
+\varepsilon_{i,t} \sim \mathcal{N}(0, \sigma^2).
+\]
+
+Advantages:
+
+- Explicit covariance structure;
+
+- Efficiency gains in estimation.
+
+### Estimation and inference
+
+- Estimation via Restricted Maximum Likelihood;
+
+- Inference for fixed effects using t-statistics and degrees-of-freedom adjustments.
+
+```{r, include = TRUE}
+library(lmerTest)
+mixed_lm <- lmer(Weight ~ Time + Diet + (Time | Chick), data = df)
+summary(mixed_lm)
+```
+
+### Diagnostics
+
+```{r, include = TRUE}
+res_diagnostics_heterosced(mixed_lm)
+res_diagnostics_autocorr(mixed_lm)
+```
+
+## 6 Summary
+
+- Chicks gain around 7 grams per day according to both fixed- and mixed-effects models;
+
+- Chicks following Diet 2 exhibit higher average growth, however this effect is not significant;
+
+- According to the mixed-effects model, chicks that are bigger at birth display lower growth over time.
+
