@@ -158,7 +158,7 @@ where
 
 - Ordinary least squares estimation;
 
-- Inference under Gaussian assumption, $\varepsilon_{i,t}\sim\mathcal{N}(0,\Sigma)$.
+- Inference under Gaussian assumption, $\varepsilon\sim\mathcal{N}(0,\Sigma)$.
 
 ```{r, include = TRUE}
 naive_lm = 
